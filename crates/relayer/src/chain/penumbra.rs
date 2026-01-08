@@ -88,7 +88,7 @@ use signature::rand_core::OsRng;
 
 use tendermint::time::Time as TmTime;
 use tendermint_light_client::verifier::types::LightBlock as TmLightBlock;
-use tendermint_rpc::{Client as _, HttpClient};
+use tendermint_rpc::{client::CompatMode, Client as _, HttpClient};
 use tokio::runtime::Runtime as TokioRuntime;
 use tokio::sync::Mutex;
 use tonic::IntoRequest;
@@ -120,6 +120,7 @@ pub struct PenumbraChain {
 
     tendermint_rpc_client: HttpClient,
     tendermint_light_client: TmLightClient,
+    compat_mode: CompatMode,
 
     tx_monitor_cmd: Option<TxEventSourceCmd>,
 
@@ -138,6 +139,13 @@ impl PenumbraChain {
         use crate::config::EventSourceMode as Mode;
 
         let (event_source, monitor_tx) = match &self.config.event_source {
+            Mode::Push { url, batch_delay } => EventSource::websocket(
+                self.config.id.clone(),
+                url.clone(),
+                self.compat_mode,
+                *batch_delay,
+                self.rt.clone(),
+            ),
             Mode::Pull {
                 interval,
                 max_retries,
@@ -148,7 +156,6 @@ impl PenumbraChain {
                 *max_retries,
                 self.rt.clone(),
             ),
-            _ => unimplemented!(),
         }
         .map_err(Error::event_source)?;
 
@@ -498,6 +505,20 @@ impl ChainEndpoint for PenumbraChain {
 
         let node_info = rt.block_on(fetch_node_info(&rpc_client, &config))?;
 
+        // Determine compat mode from node version, similar to how Namada does it
+        let compat_mode = CompatMode::from_version(node_info.version.clone())
+            .ok()
+            .or_else(|| {
+                config.compat_mode.map(|c| {
+                    c.to_string()
+                        .parse()
+                        .expect("invalid compat_mode in config")
+                })
+            })
+            .unwrap_or(CompatMode::V0_37);
+
+        tracing::info!(?compat_mode, "using RPC compat mode for Penumbra chain");
+
         let fvk = config.kms_config.spend_key.full_viewing_key();
 
         // Identify filepath for storing Penumbra view database locally.
@@ -597,6 +618,7 @@ impl ChainEndpoint for PenumbraChain {
             custody_client,
             tendermint_rpc_client: rpc_client,
             tendermint_light_client,
+            compat_mode,
             tx_monitor_cmd: None,
 
             ibc_client_grpc_client,
