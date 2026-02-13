@@ -208,6 +208,9 @@ fn subscribe(
             let subscription = monitor_tx.subscribe()?;
             Ok(subscription)
         }
+        ChainConfig::Bankd(_) => {
+            Err(eyre::eyre!("listen command not yet supported for Bankd chains"))
+        }
     }
 }
 
@@ -218,6 +221,7 @@ fn detect_compatibility_mode(
     let rpc_addr = match config {
         ChainConfig::CosmosSdk(config) | ChainConfig::Namada(config) => config.rpc_addr.clone(),
         ChainConfig::Penumbra(config) => config.rpc_addr.clone(),
+        ChainConfig::Bankd(config) => config.rpc_addr.clone(),
     };
 
     let client = HttpClient::builder(rpc_addr.try_into()?)
@@ -232,6 +236,7 @@ fn detect_compatibility_mode(
             let status = rt.block_on(client.status())?;
             penumbra::util::compat_mode_from_version(&config.compat_mode, status.node_info.version)?
         }
+        ChainConfig::Bankd(_) => CompatMode::V0_37,
     };
 
     Ok(compat_mode)

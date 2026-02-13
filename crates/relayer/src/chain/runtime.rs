@@ -512,7 +512,14 @@ where
         client_state: AnyClientState,
         reply_to: ReplyTo<AnyConsensusState>,
     ) -> Result<(), Error> {
-        let verified = self.chain.verify_header(trusted, target, &client_state)?;
+        tracing::debug!("build_consensus_state: trusted={:?}, target={:?}", trusted, target);
+        let verified = match self.chain.verify_header(trusted, target, &client_state) {
+            Ok(v) => v,
+            Err(e) => {
+                tracing::error!("verify_header failed: {:?}", e);
+                return Err(e);
+            }
+        };
 
         let consensus_state = self
             .chain

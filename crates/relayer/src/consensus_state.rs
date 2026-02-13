@@ -7,6 +7,10 @@ use ibc_proto::Protobuf;
 use ibc_relayer_types::clients::ics07_tendermint::consensus_state::{
     ConsensusState as TmConsensusState, TENDERMINT_CONSENSUS_STATE_TYPE_URL,
 };
+use ibc_relayer_types::clients::ics08_bankd::consensus_state::{
+    ConsensusState as BankdConsensusState, RawBankdConsensusState,
+    BANKD_CONSENSUS_STATE_TYPE_URL,
+};
 use ibc_relayer_types::core::ics02_client::client_type::ClientType;
 use ibc_relayer_types::core::ics02_client::consensus_state::ConsensusState;
 use ibc_relayer_types::core::ics02_client::error::Error;
@@ -18,18 +22,21 @@ use ibc_relayer_types::Height;
 #[serde(tag = "type")]
 pub enum AnyConsensusState {
     Tendermint(TmConsensusState),
+    Bankd(BankdConsensusState),
 }
 
 impl AnyConsensusState {
     pub fn timestamp(&self) -> Timestamp {
         match self {
             Self::Tendermint(cs_state) => cs_state.timestamp.into(),
+            Self::Bankd(cs_state) => cs_state.timestamp,
         }
     }
 
     pub fn client_type(&self) -> ClientType {
         match self {
             AnyConsensusState::Tendermint(_cs) => ClientType::Tendermint,
+            AnyConsensusState::Bankd(_cs) => ClientType::Bankd,
         }
     }
 }
@@ -48,6 +55,11 @@ impl TryFrom<Any> for AnyConsensusState {
                     .map_err(Error::decode_raw_client_state)?,
             )),
 
+            BANKD_CONSENSUS_STATE_TYPE_URL => Ok(AnyConsensusState::Bankd(
+                Protobuf::<RawBankdConsensusState>::decode_vec(&value.value)
+                    .map_err(Error::decode_raw_client_state)?,
+            )),
+
             _ => Err(Error::unknown_consensus_state_type(value.type_url)),
         }
     }
@@ -60,6 +72,10 @@ impl From<AnyConsensusState> for Any {
                 type_url: TENDERMINT_CONSENSUS_STATE_TYPE_URL.to_string(),
                 value: Protobuf::<RawConsensusState>::encode_vec(value),
             },
+            AnyConsensusState::Bankd(value) => Any {
+                type_url: BANKD_CONSENSUS_STATE_TYPE_URL.to_string(),
+                value: Protobuf::<RawBankdConsensusState>::encode_vec(value),
+            },
         }
     }
 }
@@ -67,6 +83,12 @@ impl From<AnyConsensusState> for Any {
 impl From<TmConsensusState> for AnyConsensusState {
     fn from(cs: TmConsensusState) -> Self {
         Self::Tendermint(cs)
+    }
+}
+
+impl From<BankdConsensusState> for AnyConsensusState {
+    fn from(cs: BankdConsensusState) -> Self {
+        Self::Bankd(cs)
     }
 }
 
@@ -115,6 +137,7 @@ impl ConsensusState for AnyConsensusState {
     fn root(&self) -> &CommitmentRoot {
         match self {
             Self::Tendermint(cs_state) => cs_state.root(),
+            Self::Bankd(cs_state) => cs_state.root(),
         }
     }
 
