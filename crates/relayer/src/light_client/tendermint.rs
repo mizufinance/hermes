@@ -156,10 +156,14 @@ impl super::LightClient<CosmosSdkChain> for LightClient {
 
         let update_header = match any_header {
             AnyHeader::Tendermint(header) => Ok::<_, Error>(header),
+            _ => Err(Error::invalid_input_header()),
         }?;
 
         let client_state = match client_state {
             AnyClientState::Tendermint(client_state) => Ok::<_, Error>(client_state),
+            _ => Err(Error::client_state_type(format!(
+                "expected Tendermint client state"
+            ))),
         }?;
 
         let next_validators = self
@@ -358,6 +362,9 @@ impl LightClient {
 
         let client_state = match client_state {
             AnyClientState::Tendermint(client_state) => Ok::<_, Error>(client_state),
+            _ => Err(Error::client_state_type(format!(
+                "expected Tendermint client state"
+            ))),
         }?;
 
         Ok(TmLightClient::new(
