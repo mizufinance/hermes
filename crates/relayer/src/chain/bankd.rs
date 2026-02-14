@@ -142,7 +142,10 @@ impl BankdChain {
             .map_err(|e| Error::other(format!("failed to decode proof hex: {}", e)))?;
 
         if proof_bytes.is_empty() {
-            return Ok(None);
+            return Err(Error::other(format!(
+                "bankd returned empty proof for path '{}' at height {}",
+                path, h
+            )));
         }
 
         Ok(Some(Self::decode_proof(&proof_bytes)?))
