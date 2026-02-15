@@ -536,15 +536,10 @@ impl ChainEndpoint for BankdChain {
         );
         crate::telemetry!(query, self.id(), "query_application_status");
 
-        let status = self
-            .rt
-            .block_on(rpc::query_node_status(&self.rpc_client, &self.config.rpc_addr))?;
-
-        // Use the finalized block count as the chain height.
-        let height = ICSHeight::new(self.config.id.version(), status.finalized_count)
-            .map_err(|_| Error::invalid_height_no_source())?;
-
-        // Fetch the latest block to get a timestamp.
+        // Use the latest indexed block for both height and timestamp.
+        // finalized_count from kora_nodeStatus can race ahead of the block
+        // indexer, so we use eth_getBlockByNumber("latest") as the source
+        // of truth to ensure the block is actually queryable.
         let block = self
             .rt
             .block_on(rpc::get_block_by_number(
@@ -553,6 +548,10 @@ impl ChainEndpoint for BankdChain {
                 "latest",
             ))?
             .ok_or_else(|| Error::other("no latest block from bankd".to_string()))?;
+
+        let block_num = Self::parse_hex_u64(&block.number)?;
+        let height = ICSHeight::new(self.config.id.version(), block_num)
+            .map_err(|_| Error::invalid_height_no_source())?;
 
         let timestamp_secs = Self::parse_hex_u64(&block.timestamp)?;
         let timestamp = Timestamp::from_nanoseconds(timestamp_secs * 1_000_000_000)

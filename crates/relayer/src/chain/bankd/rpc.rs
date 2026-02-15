@@ -299,13 +299,16 @@ pub async fn get_block_by_number(
     rpc_url: &Url,
     block: &str,
 ) -> Result<Option<EthBlock>, Error> {
-    json_rpc_call(
-        client,
-        rpc_url,
-        "eth_getBlockByNumber",
-        json!([block, false]),
-    )
-    .await
+    // Use Value to avoid serde's Option<Option<T>> flattening issue:
+    // when T = Option<EthBlock>, a JSON null result maps to None for the
+    // outer Option in JsonRpcResponse, causing a spurious "missing result" error.
+    let val: Value = json_rpc_call(client, rpc_url, "eth_getBlockByNumber", json!([block, false])).await?;
+    if val.is_null() {
+        return Ok(None);
+    }
+    let block: EthBlock = serde_json::from_value(val)
+        .map_err(|e| Error::other(format!("failed to parse EthBlock: {e}")))?;
+    Ok(Some(block))
 }
 
 // ---------------------------------------------------------------------------
@@ -371,11 +374,11 @@ pub async fn get_transaction_receipt(
     rpc_url: &Url,
     tx_hash: &str,
 ) -> Result<Option<TxReceipt>, Error> {
-    json_rpc_call(
-        client,
-        rpc_url,
-        "eth_getTransactionReceipt",
-        json!([tx_hash]),
-    )
-    .await
+    let val: Value = json_rpc_call(client, rpc_url, "eth_getTransactionReceipt", json!([tx_hash])).await?;
+    if val.is_null() {
+        return Ok(None);
+    }
+    let receipt: TxReceipt = serde_json::from_value(val)
+        .map_err(|e| Error::other(format!("failed to parse TxReceipt: {e}")))?;
+    Ok(Some(receipt))
 }
