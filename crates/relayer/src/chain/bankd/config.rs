@@ -14,6 +14,11 @@ pub struct BankdConfig {
     #[serde(default)]
     pub key_name: String,
 
+    /// Hex-encoded secp256k1 private key for signing EVM transactions.
+    /// Required for submitting IBC messages to the bankd precompile.
+    #[serde(default)]
+    pub signing_key: Option<String>,
+
     /// HTTP JSON-RPC endpoint (eth_*)
     pub rpc_addr: Url,
 

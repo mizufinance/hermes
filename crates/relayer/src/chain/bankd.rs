@@ -1,4 +1,5 @@
 pub mod config;
+pub mod evm_tx;
 pub mod rpc;
 pub mod version;
 
@@ -62,6 +63,8 @@ pub struct BankdChain {
     rt: Arc<TokioRuntime>,
     rpc_client: reqwest::Client,
     tx_monitor_cmd: Option<TxEventSourceCmd>,
+    /// EVM signer for submitting transactions to the IBC precompile.
+    evm_signer: Option<evm_tx::EvmSigner>,
 }
 
 impl BankdChain {
@@ -196,11 +199,24 @@ impl ChainEndpoint for BankdChain {
             "bankd node status OK"
         );
 
+        let evm_signer = match &config.signing_key {
+            Some(key_hex) => {
+                let signer = evm_tx::EvmSigner::from_hex(key_hex)?;
+                info!(address = %signer.address_hex(), "EVM signer loaded");
+                Some(signer)
+            }
+            None => {
+                warn!("no signing_key configured — tx submission will fail");
+                None
+            }
+        };
+
         Ok(Self {
             config,
             rt,
             rpc_client,
             tx_monitor_cmd: None,
+            evm_signer,
         })
     }
 
@@ -244,9 +260,13 @@ impl ChainEndpoint for BankdChain {
     }
 
     fn get_signer(&self) -> Result<Signer, Error> {
-        // bankd uses EVM-style signing; return a dummy signer for now.
-        // The actual EVM address will be derived when building transactions.
-        Ok(Signer::dummy())
+        match &self.evm_signer {
+            Some(signer) => signer
+                .address_hex()
+                .parse()
+                .map_err(|_| Error::other("invalid signer address".to_string())),
+            None => Ok(Signer::dummy()),
+        }
     }
 
     fn get_key(&self) -> Result<Self::SigningKeyPair, Error> {
@@ -267,10 +287,12 @@ impl ChainEndpoint for BankdChain {
     ) -> Result<Vec<IbcEventWithHeight>, Error> {
         // bankd receives IBC messages as EVM transactions to precompile 0x0800.
         // The calldata is: selector 0xc0509df1 (ibcDispatch) + ABI-encoded protobuf Any.
-        //
-        // For now, encode each message and submit via eth_sendRawTransaction,
-        // then poll for receipt. Full EVM signing is deferred until wallet
-        // integration is complete.
+
+        let signer = self.evm_signer.as_ref().ok_or_else(|| {
+            Error::other("no signing_key configured in bankd chain config".to_string())
+        })?;
+        let signer_addr = signer.address_hex();
+        let chain_id = self.config.evm_chain_id;
 
         let runtime = self.rt.clone();
         let all_events = Vec::new();
@@ -297,7 +319,23 @@ impl ChainEndpoint for BankdChain {
             let padding = (32 - (proto_bytes.len() % 32)) % 32;
             calldata.extend_from_slice(&vec![0u8; padding]);
 
-            let raw_tx_hex = format!("0x{}", hex::encode(&calldata));
+            // Fetch nonce for signer address
+            let nonce = runtime.block_on(rpc::get_transaction_count(
+                &self.rpc_client,
+                &self.config.rpc_addr,
+                &signer_addr,
+            ))?;
+
+            // Sign and RLP-encode the transaction
+            let raw = signer.sign_legacy_tx(
+                chain_id,
+                nonce,
+                1_000_000_000,  // gas price
+                10_000_000,     // gas limit
+                evm_tx::IBC_PRECOMPILE,
+                calldata,
+            )?;
+            let raw_tx_hex = format!("0x{}", hex::encode(&raw));
 
             let tx_hash: String = runtime
                 .block_on(rpc::send_raw_transaction(
@@ -347,14 +385,11 @@ impl ChainEndpoint for BankdChain {
                 )));
             }
 
-            // TODO: Parse IBC events from receipt logs when bankd emits them.
-            // For now, return an empty event list for successful transactions.
             debug!(
                 height = %height,
                 tx_hash = %tx_hash,
                 "bankd transaction confirmed"
             );
-            let _ = all_events; // suppress unused warning in future
         }
 
         Ok(all_events)

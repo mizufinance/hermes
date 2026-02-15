@@ -309,6 +309,30 @@ pub async fn get_block_by_number(
 }
 
 // ---------------------------------------------------------------------------
+// eth_getTransactionCount (nonce)
+// ---------------------------------------------------------------------------
+
+pub async fn get_transaction_count(
+    client: &reqwest::Client,
+    rpc_url: &Url,
+    address: &str,
+) -> Result<u64, Error> {
+    let hex_nonce: String = json_rpc_call(
+        client,
+        rpc_url,
+        "eth_getTransactionCount",
+        json!([address, "latest"]),
+    )
+    .await?;
+    parse_hex_u64(&hex_nonce)
+}
+
+fn parse_hex_u64(s: &str) -> Result<u64, Error> {
+    let s = s.strip_prefix("0x").unwrap_or(s);
+    u64::from_str_radix(s, 16).map_err(|e| Error::other(format!("invalid hex u64: {e}")))
+}
+
+// ---------------------------------------------------------------------------
 // eth_sendRawTransaction
 // ---------------------------------------------------------------------------
 
