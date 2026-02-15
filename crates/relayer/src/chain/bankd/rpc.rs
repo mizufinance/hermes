@@ -360,6 +360,8 @@ pub struct TxReceipt {
     pub status: String,
     pub block_number: String,
     #[serde(default)]
+    pub gas_used: String,
+    #[serde(default)]
     pub logs: Vec<Value>,
     pub transaction_hash: String,
 }

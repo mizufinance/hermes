@@ -32,7 +32,7 @@ use prost::Message;
 use serde_json::Value;
 use tendermint_rpc::endpoint::broadcast::tx_sync::Response as TxResponse;
 use tokio::runtime::Runtime as TokioRuntime;
-use tracing::{debug, info, warn};
+use tracing::{debug, error, info, warn};
 
 use crate::account::Balance;
 use crate::chain::bankd::config::BankdConfig;
@@ -297,9 +297,12 @@ impl ChainEndpoint for BankdChain {
         let runtime = self.rt.clone();
         let all_events = Vec::new();
 
-        for msg in &tracked_msgs.msgs {
+        for (i, msg) in tracked_msgs.msgs.iter().enumerate() {
             debug!(
+                msg_index = i,
+                msg_count = tracked_msgs.msgs.len(),
                 type_url = %msg.type_url,
+                value_len = msg.value.len(),
                 "submitting IBC message to bankd precompile 0x0800"
             );
 
@@ -307,7 +310,9 @@ impl ChainEndpoint for BankdChain {
             // selector = 0xc0509df1 for ibcDispatch(bytes)
             let mut calldata = vec![0xc0, 0x50, 0x9d, 0xf1];
             // ABI encoding: offset (32 bytes) + length (32 bytes) + data (padded)
-            let proto_bytes = msg.value.clone();
+            // The precompile expects the full protobuf-encoded Any (type_url + value),
+            // not just the inner value bytes.
+            let proto_bytes = msg.encode_to_vec();
             let offset = 32u64;
             let length = proto_bytes.len() as u64;
             calldata.extend_from_slice(&[0u8; 24]);
@@ -318,6 +323,12 @@ impl ChainEndpoint for BankdChain {
             // Pad to 32-byte boundary
             let padding = (32 - (proto_bytes.len() % 32)) % 32;
             calldata.extend_from_slice(&vec![0u8; padding]);
+
+            debug!(
+                calldata_len = calldata.len(),
+                proto_len = proto_bytes.len(),
+                "built ABI calldata for ibcDispatch"
+            );
 
             // Fetch nonce for signer address
             let nonce = runtime.block_on(rpc::get_transaction_count(
@@ -344,7 +355,13 @@ impl ChainEndpoint for BankdChain {
                     &raw_tx_hex,
                 ))?;
 
-            info!(tx_hash = %tx_hash, "bankd transaction submitted, polling for receipt");
+            info!(
+                tx_hash = %tx_hash,
+                nonce = nonce,
+                signer = %signer_addr,
+                evm_chain_id = chain_id,
+                "bankd transaction submitted, polling for receipt"
+            );
 
             // Poll for receipt
             let receipt = runtime.block_on(async {
@@ -379,16 +396,26 @@ impl ChainEndpoint for BankdChain {
                 })?;
 
             if receipt.status != "0x1" {
+                error!(
+                    tx_hash = %tx_hash,
+                    status = %receipt.status,
+                    block = %receipt.block_number,
+                    gas_used = %receipt.gas_used,
+                    type_url = %msg.type_url,
+                    "bankd tx REVERTED — check bankd stderr for precompile dispatch error"
+                );
                 return Err(Error::other(format!(
-                    "bankd tx {} reverted (status={})",
-                    tx_hash, receipt.status
+                    "bankd tx {} reverted (status={}) in block {} (type_url={})",
+                    tx_hash, receipt.status, receipt.block_number, msg.type_url,
                 )));
             }
 
-            debug!(
+            info!(
                 height = %height,
                 tx_hash = %tx_hash,
-                "bankd transaction confirmed"
+                gas_used = %receipt.gas_used,
+                type_url = %msg.type_url,
+                "bankd transaction confirmed OK"
             );
         }
 
