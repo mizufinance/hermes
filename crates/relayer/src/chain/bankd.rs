@@ -54,6 +54,20 @@ use ibc_relayer_types::events::IbcEvent;
 use crate::keyring::{KeyRing, Secp256k1KeyPair};
 use crate::misbehaviour::MisbehaviourEvidence;
 
+/// Decode a hex-encoded protobuf message from a bankd JSON-RPC response.
+///
+/// bankd IBC RPCs return raw protobuf bytes as hex strings. This helper
+/// extracts the string, hex-decodes it, and runs prost `decode`.
+fn decode_hex_proto<T: prost::Message + Default>(val: &Value, label: &str) -> Result<T, Error> {
+    let hex_str = val
+        .as_str()
+        .ok_or_else(|| Error::other(format!("{label}: expected hex string, got {val}")))?;
+    let bytes = hex::decode(hex_str)
+        .map_err(|e| Error::other(format!("{label}: hex decode: {e}")))?;
+    T::decode(bytes.as_slice())
+        .map_err(|e| Error::other(format!("{label}: protobuf decode: {e}")))
+}
+
 /// A bankd light block wrapping a header.
 /// Used as the `LightBlock` associated type for `ChainEndpoint`.
 #[derive(Clone, Debug)]
@@ -583,11 +597,9 @@ impl ChainEndpoint for BankdChain {
             &client_id_str,
         ))?;
 
-        // Parse the client state from the JSON-RPC response.
-        // bankd returns the protobuf-JSON representation of the client state.
+        // bankd returns hex-encoded Any-wrapped protobuf bytes.
         let client_state_any: ibc_proto::google::protobuf::Any =
-            serde_json::from_value(response)
-                .map_err(|e| Error::other(format!("failed to parse client state: {}", e)))?;
+            decode_hex_proto(&response, "client state")?;
 
         let client_state: AnyClientState = client_state_any
             .try_into()
@@ -619,13 +631,13 @@ impl ChainEndpoint for BankdChain {
             &self.rpc_client,
             &self.config.rpc_addr,
             &client_id_str,
+            consensus_height.revision_number(),
             consensus_height.revision_height(),
         ))?;
 
+        // bankd returns hex-encoded Any-wrapped protobuf bytes.
         let consensus_state_any: ibc_proto::google::protobuf::Any =
-            serde_json::from_value(response).map_err(|e| {
-                Error::other(format!("failed to parse consensus state: {}", e))
-            })?;
+            decode_hex_proto(&response, "consensus state")?;
 
         let consensus_state: AnyConsensusState = consensus_state_any
             .try_into()
@@ -728,11 +740,9 @@ impl ChainEndpoint for BankdChain {
             &conn_id_str,
         ))?;
 
-        // Parse the raw connection end from the JSON-RPC response.
+        // bankd returns hex-encoded raw protobuf bytes (no Any wrapper).
         let raw_conn: ibc_proto::ibc::core::connection::v1::ConnectionEnd =
-            serde_json::from_value(response).map_err(|e| {
-                Error::other(format!("failed to parse connection: {}", e))
-            })?;
+            decode_hex_proto(&response, "connection")?;
 
         let connection_end: ConnectionEnd = raw_conn
             .try_into()
@@ -783,9 +793,9 @@ impl ChainEndpoint for BankdChain {
             &channel_id_str,
         ))?;
 
+        // bankd returns hex-encoded raw protobuf bytes (no Any wrapper).
         let raw_channel: ibc_proto::ibc::core::channel::v1::Channel =
-            serde_json::from_value(response)
-                .map_err(|e| Error::other(format!("failed to parse channel: {}", e)))?;
+            decode_hex_proto(&response, "channel")?;
 
         let channel_end: ChannelEnd = raw_channel
             .try_into()

@@ -122,13 +122,15 @@ pub async fn query_consensus_state(
     client: &reqwest::Client,
     rpc_url: &Url,
     client_id: &str,
-    height: u64,
+    revision_number: u64,
+    revision_height: u64,
 ) -> Result<Value, Error> {
+    let height_str = format!("{revision_number}-{revision_height}");
     json_rpc_call(
         client,
         rpc_url,
         "bankd_ibcConsensusState",
-        json!([client_id, height]),
+        json!([client_id, height_str]),
     )
     .await
 }
