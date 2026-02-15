@@ -1,4 +1,5 @@
 pub mod config;
+pub mod evm_tx;
 pub mod rpc;
 pub mod version;
 
@@ -13,8 +14,10 @@ use ibc_relayer_types::applications::ics31_icq::response::CrossChainQueryRespons
 use ibc_relayer_types::clients::ics08_bankd::client_state::ClientState as BankdClientState;
 use ibc_relayer_types::clients::ics08_bankd::consensus_state::ConsensusState as BankdConsensusState;
 use ibc_relayer_types::clients::ics08_bankd::header::Header as BankdHeader;
-use ibc_relayer_types::core::ics02_client::events::UpdateClient;
+use ibc_relayer_types::core::ics02_client::events::{self as ClientEvents, UpdateClient};
 use ibc_relayer_types::core::ics02_client::height::Height;
+use ibc_relayer_types::core::ics02_client::client_type::ClientType;
+use std::str::FromStr;
 use ibc_relayer_types::core::ics03_connection::connection::{
     ConnectionEnd, IdentifiedConnectionEnd,
 };
@@ -31,7 +34,7 @@ use prost::Message;
 use serde_json::Value;
 use tendermint_rpc::endpoint::broadcast::tx_sync::Response as TxResponse;
 use tokio::runtime::Runtime as TokioRuntime;
-use tracing::{debug, info, warn};
+use tracing::{debug, error, info, warn};
 
 use crate::account::Balance;
 use crate::chain::bankd::config::BankdConfig;
@@ -47,6 +50,7 @@ use crate::denom::DenomTrace;
 use crate::error::Error;
 use crate::event::source::{EventSource, TxEventSourceCmd};
 use crate::event::IbcEventWithHeight;
+use ibc_relayer_types::events::IbcEvent;
 use crate::keyring::{KeyRing, Secp256k1KeyPair};
 use crate::misbehaviour::MisbehaviourEvidence;
 
@@ -62,6 +66,8 @@ pub struct BankdChain {
     rt: Arc<TokioRuntime>,
     rpc_client: reqwest::Client,
     tx_monitor_cmd: Option<TxEventSourceCmd>,
+    /// EVM signer for submitting transactions to the IBC precompile.
+    evm_signer: Option<evm_tx::EvmSigner>,
 }
 
 impl BankdChain {
@@ -196,11 +202,24 @@ impl ChainEndpoint for BankdChain {
             "bankd node status OK"
         );
 
+        let evm_signer = match &config.signing_key {
+            Some(key_hex) => {
+                let signer = evm_tx::EvmSigner::from_hex(key_hex)?;
+                info!(address = %signer.address_hex(), "EVM signer loaded");
+                Some(signer)
+            }
+            None => {
+                warn!("no signing_key configured — tx submission will fail");
+                None
+            }
+        };
+
         Ok(Self {
             config,
             rt,
             rpc_client,
             tx_monitor_cmd: None,
+            evm_signer,
         })
     }
 
@@ -216,15 +235,7 @@ impl ChainEndpoint for BankdChain {
             .rt
             .block_on(rpc::query_node_status(&self.rpc_client, &self.config.rpc_addr))
         {
-            Ok(status) => {
-                if status.peer_count == 0 {
-                    Ok(HealthCheck::Unhealthy(Box::new(Error::other(
-                        "bankd node has no peers".to_string(),
-                    ))))
-                } else {
-                    Ok(HealthCheck::Healthy)
-                }
-            }
+            Ok(_status) => Ok(HealthCheck::Healthy),
             Err(e) => Ok(HealthCheck::Unhealthy(Box::new(e))),
         }
     }
@@ -252,9 +263,13 @@ impl ChainEndpoint for BankdChain {
     }
 
     fn get_signer(&self) -> Result<Signer, Error> {
-        // bankd uses EVM-style signing; return a dummy signer for now.
-        // The actual EVM address will be derived when building transactions.
-        Ok(Signer::dummy())
+        match &self.evm_signer {
+            Some(signer) => signer
+                .address_hex()
+                .parse()
+                .map_err(|_| Error::other("invalid signer address".to_string())),
+            None => Ok(Signer::dummy()),
+        }
     }
 
     fn get_key(&self) -> Result<Self::SigningKeyPair, Error> {
@@ -275,17 +290,22 @@ impl ChainEndpoint for BankdChain {
     ) -> Result<Vec<IbcEventWithHeight>, Error> {
         // bankd receives IBC messages as EVM transactions to precompile 0x0800.
         // The calldata is: selector 0xc0509df1 (ibcDispatch) + ABI-encoded protobuf Any.
-        //
-        // For now, encode each message and submit via eth_sendRawTransaction,
-        // then poll for receipt. Full EVM signing is deferred until wallet
-        // integration is complete.
+
+        let signer = self.evm_signer.as_ref().ok_or_else(|| {
+            Error::other("no signing_key configured in bankd chain config".to_string())
+        })?;
+        let signer_addr = signer.address_hex();
+        let chain_id = self.config.evm_chain_id;
 
         let runtime = self.rt.clone();
-        let all_events = Vec::new();
+        let mut all_events = Vec::new();
 
-        for msg in &tracked_msgs.msgs {
+        for (i, msg) in tracked_msgs.msgs.iter().enumerate() {
             debug!(
+                msg_index = i,
+                msg_count = tracked_msgs.msgs.len(),
                 type_url = %msg.type_url,
+                value_len = msg.value.len(),
                 "submitting IBC message to bankd precompile 0x0800"
             );
 
@@ -293,7 +313,9 @@ impl ChainEndpoint for BankdChain {
             // selector = 0xc0509df1 for ibcDispatch(bytes)
             let mut calldata = vec![0xc0, 0x50, 0x9d, 0xf1];
             // ABI encoding: offset (32 bytes) + length (32 bytes) + data (padded)
-            let proto_bytes = msg.value.clone();
+            // The precompile expects the full protobuf-encoded Any (type_url + value),
+            // not just the inner value bytes.
+            let proto_bytes = msg.encode_to_vec();
             let offset = 32u64;
             let length = proto_bytes.len() as u64;
             calldata.extend_from_slice(&[0u8; 24]);
@@ -305,7 +327,29 @@ impl ChainEndpoint for BankdChain {
             let padding = (32 - (proto_bytes.len() % 32)) % 32;
             calldata.extend_from_slice(&vec![0u8; padding]);
 
-            let raw_tx_hex = format!("0x{}", hex::encode(&calldata));
+            debug!(
+                calldata_len = calldata.len(),
+                proto_len = proto_bytes.len(),
+                "built ABI calldata for ibcDispatch"
+            );
+
+            // Fetch nonce for signer address
+            let nonce = runtime.block_on(rpc::get_transaction_count(
+                &self.rpc_client,
+                &self.config.rpc_addr,
+                &signer_addr,
+            ))?;
+
+            // Sign and RLP-encode the transaction
+            let raw = signer.sign_legacy_tx(
+                chain_id,
+                nonce,
+                1_000_000_000,  // gas price
+                10_000_000,     // gas limit
+                evm_tx::IBC_PRECOMPILE,
+                calldata,
+            )?;
+            let raw_tx_hex = format!("0x{}", hex::encode(&raw));
 
             let tx_hash: String = runtime
                 .block_on(rpc::send_raw_transaction(
@@ -314,7 +358,13 @@ impl ChainEndpoint for BankdChain {
                     &raw_tx_hex,
                 ))?;
 
-            info!(tx_hash = %tx_hash, "bankd transaction submitted, polling for receipt");
+            info!(
+                tx_hash = %tx_hash,
+                nonce = nonce,
+                signer = %signer_addr,
+                evm_chain_id = chain_id,
+                "bankd transaction submitted, polling for receipt"
+            );
 
             // Poll for receipt
             let receipt = runtime.block_on(async {
@@ -349,20 +399,36 @@ impl ChainEndpoint for BankdChain {
                 })?;
 
             if receipt.status != "0x1" {
+                error!(
+                    tx_hash = %tx_hash,
+                    status = %receipt.status,
+                    block = %receipt.block_number,
+                    gas_used = %receipt.gas_used,
+                    type_url = %msg.type_url,
+                    "bankd tx REVERTED — check bankd stderr for precompile dispatch error"
+                );
                 return Err(Error::other(format!(
-                    "bankd tx {} reverted (status={})",
-                    tx_hash, receipt.status
+                    "bankd tx {} reverted (status={}) in block {} (type_url={})",
+                    tx_hash, receipt.status, receipt.block_number, msg.type_url,
                 )));
             }
 
-            // TODO: Parse IBC events from receipt logs when bankd emits them.
-            // For now, return an empty event list for successful transactions.
-            debug!(
+            // Parse IBC events from EVM logs in the receipt
+            for log in &receipt.logs {
+                if let Some(ibc_event) = parse_ibc_log(log) {
+                    debug!(event = %ibc_event, "parsed IBC event from tx receipt log");
+                    all_events.push(IbcEventWithHeight::new(ibc_event, height));
+                }
+            }
+
+            info!(
                 height = %height,
                 tx_hash = %tx_hash,
-                "bankd transaction confirmed"
+                gas_used = %receipt.gas_used,
+                type_url = %msg.type_url,
+                event_count = all_events.len(),
+                "bankd transaction confirmed OK"
             );
-            let _ = all_events; // suppress unused warning in future
         }
 
         Ok(all_events)
@@ -470,15 +536,10 @@ impl ChainEndpoint for BankdChain {
         );
         crate::telemetry!(query, self.id(), "query_application_status");
 
-        let status = self
-            .rt
-            .block_on(rpc::query_node_status(&self.rpc_client, &self.config.rpc_addr))?;
-
-        // Use the finalized block count as the chain height.
-        let height = ICSHeight::new(self.config.id.version(), status.finalized_count)
-            .map_err(|_| Error::invalid_height_no_source())?;
-
-        // Fetch the latest block to get a timestamp.
+        // Use the latest indexed block for both height and timestamp.
+        // finalized_count from kora_nodeStatus can race ahead of the block
+        // indexer, so we use eth_getBlockByNumber("latest") as the source
+        // of truth to ensure the block is actually queryable.
         let block = self
             .rt
             .block_on(rpc::get_block_by_number(
@@ -487,6 +548,10 @@ impl ChainEndpoint for BankdChain {
                 "latest",
             ))?
             .ok_or_else(|| Error::other("no latest block from bankd".to_string()))?;
+
+        let block_num = Self::parse_hex_u64(&block.number)?;
+        let height = ICSHeight::new(self.config.id.version(), block_num)
+            .map_err(|_| Error::invalid_height_no_source())?;
 
         let timestamp_secs = Self::parse_hex_u64(&block.timestamp)?;
         let timestamp = Timestamp::from_nanoseconds(timestamp_secs * 1_000_000_000)
@@ -1093,5 +1158,160 @@ impl ChainEndpoint for BankdChain {
         Err(Error::other(
             "bankd does not support CCV consumer IDs".to_string(),
         ))
+    }
+}
+
+/// Parse an EVM log from the IBC precompile (0x0800) into a Hermes `IbcEvent`.
+///
+/// The log data is newline-separated `key=value` attributes. The first line
+/// is always `event_type=<type>`, followed by event-specific fields.
+fn parse_ibc_log(log: &Value) -> Option<IbcEvent> {
+    // Check the log address is the IBC precompile (0x0800)
+    let address = log.get("address")?.as_str()?;
+    if !address.ends_with("0800") {
+        return None;
+    }
+
+    // Parse the data field (hex-encoded UTF-8 string)
+    let data_hex = log.get("data")?.as_str()?;
+    let data_bytes = hex::decode(data_hex.strip_prefix("0x").unwrap_or(data_hex)).ok()?;
+    let data_str = String::from_utf8(data_bytes).ok()?;
+
+    // Parse key=value attributes
+    let mut attrs: std::collections::HashMap<&str, &str> = std::collections::HashMap::new();
+    for line in data_str.lines() {
+        if let Some((key, value)) = line.split_once('=') {
+            attrs.insert(key, value);
+        }
+    }
+
+    let event_type = *attrs.get("event_type")?;
+    match event_type {
+        "create_client" => {
+            let client_id: ClientId = attrs.get("client_id")?.parse().ok()?;
+            let client_type = ClientType::from_str(attrs.get("client_type")?).ok()?;
+            Some(IbcEvent::CreateClient(ClientEvents::CreateClient(
+                ClientEvents::Attributes {
+                    client_id,
+                    client_type,
+                    consensus_height: Height::new(0, 1).unwrap(),
+                },
+            )))
+        }
+        "update_client" => {
+            let client_id: ClientId = attrs.get("client_id")?.parse().ok()?;
+            let client_type = ClientType::from_str(attrs.get("client_type")?).ok()?;
+            let consensus_height = parse_height(attrs.get("consensus_height")?)?;
+            Some(IbcEvent::UpdateClient(ClientEvents::UpdateClient {
+                common: ClientEvents::Attributes {
+                    client_id,
+                    client_type,
+                    consensus_height,
+                },
+                header: None,
+            }))
+        }
+        "connection_open_init" => {
+            let connection_id: ConnectionId = attrs.get("connection_id")?.parse().ok()?;
+            let client_id: ClientId = attrs.get("client_id")?.parse().ok()?;
+            let counterparty_client_id: ClientId = attrs.get("counterparty_client_id")?.parse().ok()?;
+            Some(IbcEvent::OpenInitConnection(
+                ibc_relayer_types::core::ics03_connection::events::OpenInit(
+                    ibc_relayer_types::core::ics03_connection::events::Attributes {
+                        connection_id: Some(connection_id),
+                        client_id,
+                        counterparty_connection_id: None,
+                        counterparty_client_id,
+                    },
+                ),
+            ))
+        }
+        "connection_open_try" => {
+            let connection_id: ConnectionId = attrs.get("connection_id")?.parse().ok()?;
+            let client_id: ClientId = attrs.get("client_id")?.parse().ok()?;
+            let counterparty_client_id: ClientId = attrs.get("counterparty_client_id")?.parse().ok()?;
+            Some(IbcEvent::OpenTryConnection(
+                ibc_relayer_types::core::ics03_connection::events::OpenTry(
+                    ibc_relayer_types::core::ics03_connection::events::Attributes {
+                        connection_id: Some(connection_id),
+                        client_id,
+                        counterparty_connection_id: None,
+                        counterparty_client_id,
+                    },
+                ),
+            ))
+        }
+        "connection_open_ack" => {
+            let connection_id: ConnectionId = attrs.get("connection_id")?.parse().ok()?;
+            let client_id: ClientId = attrs.get("client_id")?.parse().ok()?;
+            let counterparty_client_id: ClientId = attrs.get("counterparty_client_id")?.parse().ok()?;
+            Some(IbcEvent::OpenAckConnection(
+                ibc_relayer_types::core::ics03_connection::events::OpenAck(
+                    ibc_relayer_types::core::ics03_connection::events::Attributes {
+                        connection_id: Some(connection_id),
+                        client_id,
+                        counterparty_connection_id: None,
+                        counterparty_client_id,
+                    },
+                ),
+            ))
+        }
+        "channel_open_init" => {
+            let port_id: PortId = attrs.get("port_id")?.parse().ok()?;
+            let channel_id: ChannelId = attrs.get("channel_id")?.parse().ok()?;
+            let connection_id: ConnectionId = attrs.get("connection_id")?.parse().ok()?;
+            Some(IbcEvent::OpenInitChannel(
+                ibc_relayer_types::core::ics04_channel::events::OpenInit {
+                    port_id,
+                    channel_id: Some(channel_id),
+                    connection_id,
+                    counterparty_port_id: PortId::default(),
+                    counterparty_channel_id: None,
+                },
+            ))
+        }
+        "channel_open_try" => {
+            let port_id: PortId = attrs.get("port_id")?.parse().ok()?;
+            let channel_id: ChannelId = attrs.get("channel_id")?.parse().ok()?;
+            let connection_id: ConnectionId = attrs.get("connection_id")?.parse().ok()?;
+            Some(IbcEvent::OpenTryChannel(
+                ibc_relayer_types::core::ics04_channel::events::OpenTry {
+                    port_id,
+                    channel_id: Some(channel_id),
+                    connection_id,
+                    counterparty_port_id: PortId::default(),
+                    counterparty_channel_id: None,
+                },
+            ))
+        }
+        "channel_open_ack" => {
+            let port_id: PortId = attrs.get("port_id")?.parse().ok()?;
+            let channel_id: ChannelId = attrs.get("channel_id")?.parse().ok()?;
+            let connection_id: ConnectionId = attrs.get("connection_id")?.parse().ok()?;
+            Some(IbcEvent::OpenAckChannel(
+                ibc_relayer_types::core::ics04_channel::events::OpenAck {
+                    port_id,
+                    channel_id: Some(channel_id),
+                    connection_id,
+                    counterparty_port_id: PortId::default(),
+                    counterparty_channel_id: None,
+                },
+            ))
+        }
+        _ => {
+            debug!(event_type, "unhandled IBC event type from bankd log");
+            None
+        }
+    }
+}
+
+fn parse_height(s: &str) -> Option<Height> {
+    let parts: Vec<&str> = s.split('-').collect();
+    if parts.len() == 2 {
+        let revision: u64 = parts[0].parse().ok()?;
+        let height: u64 = parts[1].parse().ok()?;
+        Height::new(revision, height).ok()
+    } else {
+        None
     }
 }
