@@ -14,8 +14,10 @@ use ibc_relayer_types::applications::ics31_icq::response::CrossChainQueryRespons
 use ibc_relayer_types::clients::ics08_bankd::client_state::ClientState as BankdClientState;
 use ibc_relayer_types::clients::ics08_bankd::consensus_state::ConsensusState as BankdConsensusState;
 use ibc_relayer_types::clients::ics08_bankd::header::Header as BankdHeader;
-use ibc_relayer_types::core::ics02_client::events::UpdateClient;
+use ibc_relayer_types::core::ics02_client::events::{self as ClientEvents, UpdateClient};
 use ibc_relayer_types::core::ics02_client::height::Height;
+use ibc_relayer_types::core::ics02_client::client_type::ClientType;
+use std::str::FromStr;
 use ibc_relayer_types::core::ics03_connection::connection::{
     ConnectionEnd, IdentifiedConnectionEnd,
 };
@@ -48,6 +50,7 @@ use crate::denom::DenomTrace;
 use crate::error::Error;
 use crate::event::source::{EventSource, TxEventSourceCmd};
 use crate::event::IbcEventWithHeight;
+use ibc_relayer_types::events::IbcEvent;
 use crate::keyring::{KeyRing, Secp256k1KeyPair};
 use crate::misbehaviour::MisbehaviourEvidence;
 
@@ -295,7 +298,7 @@ impl ChainEndpoint for BankdChain {
         let chain_id = self.config.evm_chain_id;
 
         let runtime = self.rt.clone();
-        let all_events = Vec::new();
+        let mut all_events = Vec::new();
 
         for (i, msg) in tracked_msgs.msgs.iter().enumerate() {
             debug!(
@@ -410,11 +413,20 @@ impl ChainEndpoint for BankdChain {
                 )));
             }
 
+            // Parse IBC events from EVM logs in the receipt
+            for log in &receipt.logs {
+                if let Some(ibc_event) = parse_ibc_log(log) {
+                    debug!(event = %ibc_event, "parsed IBC event from tx receipt log");
+                    all_events.push(IbcEventWithHeight::new(ibc_event, height));
+                }
+            }
+
             info!(
                 height = %height,
                 tx_hash = %tx_hash,
                 gas_used = %receipt.gas_used,
                 type_url = %msg.type_url,
+                event_count = all_events.len(),
                 "bankd transaction confirmed OK"
             );
         }
@@ -1147,5 +1159,160 @@ impl ChainEndpoint for BankdChain {
         Err(Error::other(
             "bankd does not support CCV consumer IDs".to_string(),
         ))
+    }
+}
+
+/// Parse an EVM log from the IBC precompile (0x0800) into a Hermes `IbcEvent`.
+///
+/// The log data is newline-separated `key=value` attributes. The first line
+/// is always `event_type=<type>`, followed by event-specific fields.
+fn parse_ibc_log(log: &Value) -> Option<IbcEvent> {
+    // Check the log address is the IBC precompile (0x0800)
+    let address = log.get("address")?.as_str()?;
+    if !address.ends_with("0800") {
+        return None;
+    }
+
+    // Parse the data field (hex-encoded UTF-8 string)
+    let data_hex = log.get("data")?.as_str()?;
+    let data_bytes = hex::decode(data_hex.strip_prefix("0x").unwrap_or(data_hex)).ok()?;
+    let data_str = String::from_utf8(data_bytes).ok()?;
+
+    // Parse key=value attributes
+    let mut attrs: std::collections::HashMap<&str, &str> = std::collections::HashMap::new();
+    for line in data_str.lines() {
+        if let Some((key, value)) = line.split_once('=') {
+            attrs.insert(key, value);
+        }
+    }
+
+    let event_type = *attrs.get("event_type")?;
+    match event_type {
+        "create_client" => {
+            let client_id: ClientId = attrs.get("client_id")?.parse().ok()?;
+            let client_type = ClientType::from_str(attrs.get("client_type")?).ok()?;
+            Some(IbcEvent::CreateClient(ClientEvents::CreateClient(
+                ClientEvents::Attributes {
+                    client_id,
+                    client_type,
+                    consensus_height: Height::new(0, 1).unwrap(),
+                },
+            )))
+        }
+        "update_client" => {
+            let client_id: ClientId = attrs.get("client_id")?.parse().ok()?;
+            let client_type = ClientType::from_str(attrs.get("client_type")?).ok()?;
+            let consensus_height = parse_height(attrs.get("consensus_height")?)?;
+            Some(IbcEvent::UpdateClient(ClientEvents::UpdateClient {
+                common: ClientEvents::Attributes {
+                    client_id,
+                    client_type,
+                    consensus_height,
+                },
+                header: None,
+            }))
+        }
+        "connection_open_init" => {
+            let connection_id: ConnectionId = attrs.get("connection_id")?.parse().ok()?;
+            let client_id: ClientId = attrs.get("client_id")?.parse().ok()?;
+            let counterparty_client_id: ClientId = attrs.get("counterparty_client_id")?.parse().ok()?;
+            Some(IbcEvent::OpenInitConnection(
+                ibc_relayer_types::core::ics03_connection::events::OpenInit(
+                    ibc_relayer_types::core::ics03_connection::events::Attributes {
+                        connection_id: Some(connection_id),
+                        client_id,
+                        counterparty_connection_id: None,
+                        counterparty_client_id,
+                    },
+                ),
+            ))
+        }
+        "connection_open_try" => {
+            let connection_id: ConnectionId = attrs.get("connection_id")?.parse().ok()?;
+            let client_id: ClientId = attrs.get("client_id")?.parse().ok()?;
+            let counterparty_client_id: ClientId = attrs.get("counterparty_client_id")?.parse().ok()?;
+            Some(IbcEvent::OpenTryConnection(
+                ibc_relayer_types::core::ics03_connection::events::OpenTry(
+                    ibc_relayer_types::core::ics03_connection::events::Attributes {
+                        connection_id: Some(connection_id),
+                        client_id,
+                        counterparty_connection_id: None,
+                        counterparty_client_id,
+                    },
+                ),
+            ))
+        }
+        "connection_open_ack" => {
+            let connection_id: ConnectionId = attrs.get("connection_id")?.parse().ok()?;
+            let client_id: ClientId = attrs.get("client_id")?.parse().ok()?;
+            let counterparty_client_id: ClientId = attrs.get("counterparty_client_id")?.parse().ok()?;
+            Some(IbcEvent::OpenAckConnection(
+                ibc_relayer_types::core::ics03_connection::events::OpenAck(
+                    ibc_relayer_types::core::ics03_connection::events::Attributes {
+                        connection_id: Some(connection_id),
+                        client_id,
+                        counterparty_connection_id: None,
+                        counterparty_client_id,
+                    },
+                ),
+            ))
+        }
+        "channel_open_init" => {
+            let port_id: PortId = attrs.get("port_id")?.parse().ok()?;
+            let channel_id: ChannelId = attrs.get("channel_id")?.parse().ok()?;
+            let connection_id: ConnectionId = attrs.get("connection_id")?.parse().ok()?;
+            Some(IbcEvent::OpenInitChannel(
+                ibc_relayer_types::core::ics04_channel::events::OpenInit {
+                    port_id,
+                    channel_id: Some(channel_id),
+                    connection_id,
+                    counterparty_port_id: PortId::default(),
+                    counterparty_channel_id: None,
+                },
+            ))
+        }
+        "channel_open_try" => {
+            let port_id: PortId = attrs.get("port_id")?.parse().ok()?;
+            let channel_id: ChannelId = attrs.get("channel_id")?.parse().ok()?;
+            let connection_id: ConnectionId = attrs.get("connection_id")?.parse().ok()?;
+            Some(IbcEvent::OpenTryChannel(
+                ibc_relayer_types::core::ics04_channel::events::OpenTry {
+                    port_id,
+                    channel_id: Some(channel_id),
+                    connection_id,
+                    counterparty_port_id: PortId::default(),
+                    counterparty_channel_id: None,
+                },
+            ))
+        }
+        "channel_open_ack" => {
+            let port_id: PortId = attrs.get("port_id")?.parse().ok()?;
+            let channel_id: ChannelId = attrs.get("channel_id")?.parse().ok()?;
+            let connection_id: ConnectionId = attrs.get("connection_id")?.parse().ok()?;
+            Some(IbcEvent::OpenAckChannel(
+                ibc_relayer_types::core::ics04_channel::events::OpenAck {
+                    port_id,
+                    channel_id: Some(channel_id),
+                    connection_id,
+                    counterparty_port_id: PortId::default(),
+                    counterparty_channel_id: None,
+                },
+            ))
+        }
+        _ => {
+            debug!(event_type, "unhandled IBC event type from bankd log");
+            None
+        }
+    }
+}
+
+fn parse_height(s: &str) -> Option<Height> {
+    let parts: Vec<&str> = s.split('-').collect();
+    if parts.len() == 2 {
+        let revision: u64 = parts[0].parse().ok()?;
+        let height: u64 = parts[1].parse().ok()?;
+        Height::new(revision, height).ok()
+    } else {
+        None
     }
 }
