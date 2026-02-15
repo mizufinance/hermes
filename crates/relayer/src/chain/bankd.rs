@@ -216,15 +216,7 @@ impl ChainEndpoint for BankdChain {
             .rt
             .block_on(rpc::query_node_status(&self.rpc_client, &self.config.rpc_addr))
         {
-            Ok(status) => {
-                if status.peer_count == 0 {
-                    Ok(HealthCheck::Unhealthy(Box::new(Error::other(
-                        "bankd node has no peers".to_string(),
-                    ))))
-                } else {
-                    Ok(HealthCheck::Healthy)
-                }
-            }
+            Ok(_status) => Ok(HealthCheck::Healthy),
             Err(e) => Ok(HealthCheck::Unhealthy(Box::new(e))),
         }
     }
