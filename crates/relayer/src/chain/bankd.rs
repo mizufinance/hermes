@@ -1056,6 +1056,7 @@ impl ChainEndpoint for BankdChain {
         Ok(BankdConsensusState::new(
             CommitmentRoot::from_bytes(&root_bytes),
             timestamp,
+            vec![],
         ))
     }
 
@@ -1081,6 +1082,7 @@ impl ChainEndpoint for BankdChain {
         Ok(BankdConsensusState::new(
             CommitmentRoot::from_bytes(&header.ibc_root),
             header.timestamp,
+            vec![],
         ))
     }
 

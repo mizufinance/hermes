@@ -12,24 +12,27 @@ use crate::timestamp::Timestamp;
 
 pub const BANKD_CONSENSUS_STATE_TYPE_URL: &str = "/ibc.lightclients.bankd.v1.ConsensusState";
 
-/// Prost-generated raw protobuf type for bankd ConsensusState wire format.
+/// Raw protobuf type matching bankd.proto ConsensusState.
 #[derive(Clone, PartialEq, Message)]
 pub struct RawBankdConsensusState {
-    #[prost(message, optional, tag = "1")]
-    pub timestamp: Option<ibc_proto::google::protobuf::Timestamp>,
-    #[prost(bytes = "vec", tag = "2")]
+    #[prost(bytes = "vec", tag = "1")]
     pub root: Vec<u8>,
+    #[prost(uint64, tag = "2")]
+    pub timestamp: u64,
+    #[prost(bytes = "vec", tag = "3")]
+    pub group_public_key: Vec<u8>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ConsensusState {
     pub timestamp: Timestamp,
     pub root: CommitmentRoot,
+    pub group_public_key: Vec<u8>,
 }
 
 impl ConsensusState {
-    pub fn new(root: CommitmentRoot, timestamp: Timestamp) -> Self {
-        Self { timestamp, root }
+    pub fn new(root: CommitmentRoot, timestamp: Timestamp, group_public_key: Vec<u8>) -> Self {
+        Self { timestamp, root, group_public_key }
     }
 }
 
@@ -53,32 +56,25 @@ impl TryFrom<RawBankdConsensusState> for ConsensusState {
     type Error = Error;
 
     fn try_from(raw: RawBankdConsensusState) -> Result<Self, Self::Error> {
-        let proto_timestamp = raw
-            .timestamp
-            .ok_or_else(Error::missing_timestamp)?;
-
-        let timestamp = Timestamp::from_nanoseconds(
-            (proto_timestamp.seconds as u64) * 1_000_000_000
-                + (proto_timestamp.nanos as u64),
-        )
-        .map_err(|_| Error::invalid_raw_consensus_state("invalid timestamp".into()))?;
+        let timestamp = Timestamp::from_nanoseconds(raw.timestamp * 1_000_000_000)
+            .map_err(|_| Error::invalid_raw_consensus_state("invalid timestamp".into()))?;
 
         Ok(Self {
             root: raw.root.into(),
             timestamp,
+            group_public_key: raw.group_public_key,
         })
     }
 }
 
 impl From<ConsensusState> for RawBankdConsensusState {
     fn from(value: ConsensusState) -> Self {
-        let nanos = value.timestamp.nanoseconds();
-        let seconds = (nanos / 1_000_000_000) as i64;
-        let nanos = (nanos % 1_000_000_000) as i32;
+        let timestamp_secs = value.timestamp.nanoseconds() / 1_000_000_000;
 
         Self {
-            timestamp: Some(ibc_proto::google::protobuf::Timestamp { seconds, nanos }),
             root: value.root.into_vec(),
+            timestamp: timestamp_secs,
+            group_public_key: value.group_public_key,
         }
     }
 }

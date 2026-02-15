@@ -15,7 +15,7 @@ use crate::Height;
 
 pub const BANKD_CLIENT_STATE_TYPE_URL: &str = "/ibc.lightclients.bankd.v1.ClientState";
 
-/// Prost-generated raw protobuf type for bankd ClientState wire format.
+/// Raw protobuf type matching bankd.proto ClientState.
 #[derive(Clone, PartialEq, Message)]
 pub struct RawBankdClientState {
     #[prost(string, tag = "1")]
@@ -24,10 +24,11 @@ pub struct RawBankdClientState {
     pub latest_height: Option<ibc_proto::ibc::core::client::v1::Height>,
     #[prost(message, optional, tag = "3")]
     pub frozen_height: Option<ibc_proto::ibc::core::client::v1::Height>,
-    #[prost(bytes = "vec", tag = "4")]
+    // tag 4 = repeated ProofSpec proof_specs (omitted — unused by relayer)
+    #[prost(bytes = "vec", tag = "5")]
     pub group_public_key: Vec<u8>,
-    #[prost(message, optional, tag = "5")]
-    pub trusting_period: Option<ibc_proto::google::protobuf::Duration>,
+    #[prost(uint64, tag = "6")]
+    pub trusting_period_secs: u64,
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
@@ -122,15 +123,7 @@ impl TryFrom<RawBankdClientState> for ClientState {
                 .map_err(|_| Error::missing_latest_height())?,
             frozen_height,
             group_public_key: raw.group_public_key,
-            trusting_period: raw
-                .trusting_period
-                .ok_or_else(|| {
-                    Error::invalid_raw_client_state("missing trusting period".into())
-                })?
-                .try_into()
-                .map_err(|_| {
-                    Error::invalid_raw_client_state("invalid trusting period".into())
-                })?,
+            trusting_period: Duration::from_secs(raw.trusting_period_secs),
         })
     }
 }
@@ -148,7 +141,7 @@ impl From<ClientState> for RawBankdClientState {
                     revision_height: 0,
                 })),
             group_public_key: value.group_public_key,
-            trusting_period: Some(value.trusting_period.try_into().unwrap()),
+            trusting_period_secs: value.trusting_period.as_secs(),
         }
     }
 }
