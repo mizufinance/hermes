@@ -121,6 +121,12 @@ pub fn requires_legacy_upgrade_proposal(
                 crate::chain::namada::error::Error::upgrade().into(),
             ))
         }
+        Specs::Bankd(_) => {
+            return Err(UpgradeChainError::submit(
+                dst_chain.id(),
+                Error::other("bankd does not support chain upgrades".to_string()),
+            ))
+        }
     };
 
     let sdk_before_50 = version_specs

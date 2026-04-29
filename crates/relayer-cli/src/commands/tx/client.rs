@@ -212,6 +212,7 @@ impl Runnable for TxUpdateClientCmd {
                     ChainConfig::Penumbra(chain_config) => {
                         chain_config.genesis_restart = Some(restart_params)
                     }
+                    ChainConfig::Bankd(_) => { /* no genesis restart support */ }
                 },
                 None => {
                     Output::error(format!(

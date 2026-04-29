@@ -1,5 +1,6 @@
 use core::fmt::{Display, Error as FmtError, Formatter};
 
+use crate::chain::bankd::version::Specs as BankdSpecs;
 use crate::chain::cosmos::version::Specs as CosmosSpecs;
 use crate::chain::namada::version::Specs as NamadaSpecs;
 use crate::chain::penumbra::version::Specs as PenumbraSpecs;
@@ -26,4 +27,5 @@ pub enum Specs {
     Cosmos(CosmosSpecs),
     Namada(NamadaSpecs),
     Penumbra(PenumbraSpecs),
+    Bankd(BankdSpecs),
 }
