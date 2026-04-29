@@ -134,3 +134,9 @@ overflow-checks = true
 # tendermint-light-client-verifier = { git = "https://github.com/informalsystems/tendermint-rs.git", branch = "main" }
 # tendermint-light-client-detector = { git = "https://github.com/informalsystems/tendermint-rs.git", branch = "main" }
 # tendermint-testgen               = { git = "https://github.com/informalsystems/tendermint-rs.git", branch = "main" }
+
+decaf377 = { git = "https://github.com/mizufinance/decaf377", branch = "main" }
+decaf377-rdsa = { git = "https://github.com/mizufinance/decaf377-rdsa", branch = "main" }
+poseidon377 = { git = "https://github.com/mizufinance/poseidon377", branch = "main" }
+poseidon-permutation = { git = "https://github.com/mizufinance/poseidon377", branch = "main" }
+poseidon-parameters = { git = "https://github.com/mizufinance/poseidon377", branch = "main" }

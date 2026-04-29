@@ -19,14 +19,14 @@ all-features = true
 default   = ["flex-error/std", "flex-error/eyre_tracer"]
 
 [dependencies]
-penumbra-sdk-proto       = { version = "2.0.0", features = ["box-grpc", "rpc"] }
-penumbra-sdk-wallet      = "2.0.0"
-penumbra-sdk-keys        = "2.0.0"
-penumbra-sdk-ibc         = "2.0.0"
-penumbra-sdk-custody     = "2.0.0"
-penumbra-sdk-fee         = "2.0.0"
-penumbra-sdk-view        = "2.0.0"
-penumbra-sdk-transaction = { version = "2.0.0", features = ["download-proving-keys"] }
+penumbra-sdk-proto       = { git = "https://github.com/mizufinance/penumbra.git", rev = "2e5423bba03e4dbe51a43de0cb34b8be737498df", features = ["box-grpc", "rpc"] }
+penumbra-sdk-wallet      = { git = "https://github.com/mizufinance/penumbra.git", rev = "2e5423bba03e4dbe51a43de0cb34b8be737498df" }
+penumbra-sdk-keys        = { git = "https://github.com/mizufinance/penumbra.git", rev = "2e5423bba03e4dbe51a43de0cb34b8be737498df" }
+penumbra-sdk-ibc         = { git = "https://github.com/mizufinance/penumbra.git", rev = "2e5423bba03e4dbe51a43de0cb34b8be737498df" }
+penumbra-sdk-custody     = { git = "https://github.com/mizufinance/penumbra.git", rev = "2e5423bba03e4dbe51a43de0cb34b8be737498df" }
+penumbra-sdk-fee         = { git = "https://github.com/mizufinance/penumbra.git", rev = "2e5423bba03e4dbe51a43de0cb34b8be737498df" }
+penumbra-sdk-view        = { git = "https://github.com/mizufinance/penumbra.git", rev = "2e5423bba03e4dbe51a43de0cb34b8be737498df" }
+penumbra-sdk-transaction = { git = "https://github.com/mizufinance/penumbra.git", rev = "2e5423bba03e4dbe51a43de0cb34b8be737498df" }
 pbjson-types = "0.7"
 shellexpand  = "3.1.1"
 
